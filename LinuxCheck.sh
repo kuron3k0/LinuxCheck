@@ -5,9 +5,9 @@ echo " ========================================================= "
 echo " \        Linux应急处置/信息搜集/漏洞检测脚本 V3.0      / "
 echo " ========================================================= "
 echo " # 支持Centos、Debian系统检测                    "
-echo " # author：al0ne                    "
+echo " # author：al0ne、kuron3k0                    "
 echo " # https://github.com/al0ne                    "
-echo " # 更新日期：2024年4月20日                    "
+echo " # 更新日期：2025年6月17日                    "
 echo " # 参考来源：                "
 echo " #   1.Gscan https://github.com/grayddq/GScan  "
 echo " #   2.Lynis https://github.com/CISOfy/lynis  "
@@ -218,6 +218,34 @@ process_check() {
     print_msg "未检测到SSH软连接后门"
 
   fi
+
+  ###############
+  # 检查异常进程参数
+  print_msg "### 异常进程参数"
+  print_code "$(ps aux | grep -E '\.\/|wget|curl|bash \-i|perl |python |sh \-c|/bin/sh' | grep -v grep)"
+
+  # 检查内存中的恶意代码
+  print_msg "### 内存中的可疑字符串"
+  print_code "$(strings /dev/mem 2>/dev/null | grep -i 'backdoor\|bind\|shell\|reverse' | head -n 50)"
+
+  # 检查异常内存映射
+  print_msg "### 异常内存映射检查"
+  print_code "$(grep -l 'tmp' /proc/*/maps 2>/dev/null | xargs -r ls -la 2>/dev/null | grep -v 'systemd|snapd|docker')"
+
+  # 检查隐藏进程
+  print_msg "### 隐藏进程检查"
+  print_code "$(ps -ef | grep -iE '\[.*\]' | grep -v '\[.*\]')"
+
+  # 内存转储分析
+  print_msg "### 内存进程转储"
+  if command -v gdb &> /dev/null; then
+      for pid in $(pgrep -f 'bash|sh|zsh|dash|ksh'); do
+          gcore -o /tmp/core_dump $pid 2>/dev/null
+          strings /tmp/core_dump* | grep -E 'http|https|tcp|udp|.onion|.ru|.cn|.ir' | sort | uniq -c | sort -nr
+          rm -f /tmp/core_dump*
+      done
+  fi
+
 }
 
 network_check() {
@@ -286,6 +314,19 @@ network_check() {
   print_msg "### IPTABLES防火墙"
   print_code "$(iptables -L)"
 
+  ###################
+  # 检查异常网络连接
+  print_msg "### 异常网络连接分析"
+  print_code "$(netstat -tulnap | grep -E '(([0-9]{1,3}\.){3}[0-9]{1,3}|:):[0-9]' | grep -v '127.0.0.1')"
+
+  # 检查隐藏连接
+  print_msg "### 隐藏连接检查"
+  print_code "$(ss -tulpn | grep -i "hidden\|stealth")"
+
+  # 检查异常DNS查询
+  print_msg "### 异常DNS解析"
+  print_code "$(grep -i 'query' /var/log/* 2>/dev/null | grep -E '([0-9]{1,3}\.){3}[0-9]{1,3}' | tail -n 50)"
+
 }
 
 crontab_check() {
@@ -306,6 +347,13 @@ crontab_check() {
   print_msg "### Crontab Backdoor"
   reverse_shell_check /etc/cron*
   reverse_shell_check /var/spool/cron/*
+
+  ###################
+  # 检查用户crontab
+  print_msg "### 所有用户crontab"
+  for user in $(cut -f1 -d: /etc/passwd); do 
+      crontab -u $user -l 2>/dev/null | grep -v '^#' 
+  done
 }
 
 env_check() {
@@ -354,6 +402,15 @@ env_check() {
   # 正在运行的环境变量
   print_msg "### 正在运行的进程环境变量问题"
   print_code "$(grep -P 'LD_PRELOAD|LD_ELF_PRELOAD|LD_AOUT_PRELOAD|PROMPT_COMMAND|LD_LIBRARY_PATH' /proc/*/environ)"
+
+  ###################
+  # 检查日志删除痕迹
+  print_msg "### 日志删除痕迹"
+  print_code "$(journalctl --verify 2>&1 | grep -i 'corrupt')"
+
+  # 检查敏感命令历史
+  print_msg "### 敏感命令历史"
+  print_code "$(grep -E 'wget|curl|bash \-i|>/dev/tcp|chmod|useradd|adduser|chattr|/bin/sh|/bin/bash' /home/*/.*_history /root/.*_history 2>/dev/null | tail -n 50)"
 }
 
 user_check() {
@@ -382,6 +439,10 @@ user_check() {
   print_msg "### 登陆ip"
   print_code "$(grep -i -a Accepted /var/log/secure /var/log/auth.* 2>/dev/null | grep -Po '\d+\.\d+\.\d+\.\d+' | sort | uniq)"
 
+  ###################
+  # 检查空密码账户
+  print_msg "### 空密码账户检查"
+  awk -F: '($2 == "" ) {print $1}' /etc/shadow 2>/dev/null
 }
 
 init_check() {
@@ -391,6 +452,13 @@ init_check() {
   print_code "$(ls -alhtR /etc/init.d | head -n 30)"
   print_msg "### /etc/init.d 黑特征"
   reverse_shell_check /etc/init.d/*
+
+  ###################
+  # 检查系统服务异常启动项
+  print_msg "### 系统服务启动项"
+  print_code "$(systemctl list-unit-files --state=enabled | grep -vE 'static|enabled-runtime|alias')"
+
+
 }
 
 service_check() {
@@ -505,6 +573,23 @@ file_check() {
   print_msg "### 可疑黑客文件 "
   print_code "$(find /root /home /opt /tmp /var/ /dev -regextype posix-extended -regex '.*wget|.*curl|.*openssl|.*mysql' -type f 2>/dev/null | xargs -i{} ls -alh {} | egrep -v '/pkgs/|/envs/|overlay2')"
 
+  ########################
+  # 检查最近修改的可执行文件
+  print_msg "### 最近修改的可执行文件"
+  print_code "$(find / -type f -executable -mtime -7 -ls 2>/dev/null | sort -k8,8 | tail -n 20)"
+
+  # 检查异常隐藏文件
+  print_msg "### 异常隐藏文件"
+  print_code "$(find / -name ".. *" -o -name "...*" -o -name ".. ?" -o -name "..??*" -o -name ".??*" -o -name " " -o -name " " 2>/dev/null)"
+
+  # 检查/tmp和/var/tmp异常
+  print_msg "### /tmp和/var/tmp异常文件"
+  print_code "$(ls -la /tmp /var/tmp 2>/dev/null | grep -v '^d' | grep -v 'total')"
+
+  # 创建文件系统时间线
+print_msg "### 最近修改的关键文件"
+print_code "$(find /etc /bin /sbin /usr/bin /usr/sbin -type f -mtime -7 -ls 2>/dev/null | sort -k8,8 | tail -n 50)"
+
 }
 
 rootkit_check() {
@@ -525,6 +610,10 @@ rootkit_check() {
   print_msg "### 可疑的.ko模块"
   print_code "$(find / ! -path '/var/lib/docker/overlay2/*' ! -path '/proc/*' ! -path '/usr/lib/modules/*' ! -path '/lib/modules/*' ! -path '/boot/*' -regextype posix-extended -regex '.*\.ko' | egrep -v 'tutor.ko')"
 
+
+  ####################
+  # 检查隐藏模块
+  print_code "$(grep -v '^#' /etc/modprobe.conf /etc/modprobe.d/* 2>/dev/null | grep -v '^$')"
 }
 
 ssh_check() {
@@ -653,6 +742,14 @@ risk_check() {
 docker_check() {
 
   print_msg "## Docker信息检测"
+  ####################
+  # 检查Docker容器逃逸
+  print_msg "### 容器逃逸检测"
+  if command -v docker &> /dev/null; then
+      print_code "$(docker ps -a --no-trunc | grep -v 'CONTAINER ID')"
+      print_code "$(find / -name '*.sock' -type s 2>/dev/null | xargs ls -la 2>/dev/null)"
+  fi
+  ####################
 
   print_msg "### Docker运行的镜像"
   print_code "$(docker ps)"
